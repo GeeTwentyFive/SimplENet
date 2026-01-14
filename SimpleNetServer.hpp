@@ -6259,9 +6259,101 @@ extern "C" {
 #endif // ENET_INCLUDE_H
 #pragma endregion _ENET_H
 
+#include <limits.h>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
 
-int main() {
-        // TODO
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
-        return 0;
-}
+
+// TODO: PacketType, send type bool (one for each channel)
+
+
+class SimpleNetServer {
+public:
+        typedef uint64_t ClientID;
+        typedef uint8_t PacketType;
+
+        typedef void (*ConnectCallback)();
+        typedef void (*DisconnectCallback)();
+
+        enum { SEND_ALL = -1 };
+
+
+private:
+        ClientID _client_GUID = 0;
+        inline const ClientID NewClientGUID() {
+                if (_client_GUID == UINT64_MAX-2) throw std::runtime_error(
+                        "Client GUID counter overflow"
+                );
+
+                return _client_GUID++;
+        }
+
+        enum Channel {
+                UNRELIABLE,
+                RELIABLE
+        };
+
+
+        ENetHost* server;
+
+        std::unordered_map<ENetPeer*, ClientID> peer_to_client_id;
+        std::unordered_map<ClientID, ENetPeer*> client_id_to_peer;
+
+
+public:
+        SimpleNetServer(
+                int port,
+                size_t max_clients = 1
+        ) {
+                if (enet_initialize() != 0) throw std::runtime_error(
+                        "Failed to initialize ENet"
+                );
+
+                ENetAddress address = {0};
+                address.host = ENET_HOST_ANY;
+                address.port = port;
+                server = enet_host_create(&address, max_clients, 2, 0, 0);
+                if (server == nullptr) throw std::runtime_error(
+                        "Failed to create ENet server"
+                );
+
+                #ifdef _WIN32
+                timeBeginPeriod(1);
+                #endif
+        }
+
+        void send(
+                void* data,
+                size_t data_size,
+                PacketType packet_type = 0, // TODO: append
+                bool reliable = true, // TODO: pick both channel *and* reliability
+                ClientID client_id = SEND_ALL
+        ) {
+                // TODO
+        }
+
+        std::vector<
+                std::pair<PacketType, std::vector<char>>
+        > service() {
+                ENetEvent event;
+                // TODO: Loop -> save into vector -> return
+        }
+
+        ~SimpleNetServer() {
+                #ifdef _WIN32
+                timeEndPeriod(1);
+                #endif
+
+                enet_host_destroy(server);
+                enet_deinitialize();
+        }
+
+
+private:
+        //
+};
