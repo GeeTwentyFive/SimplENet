@@ -6269,7 +6269,7 @@ extern "C" {
 #endif
 
 
-class SimplENetServer {
+class SimplENetClient {
 public:
         typedef uint16_t ClientID;
         typedef uint8_t PacketType;
@@ -6281,56 +6281,57 @@ public:
             std::vector<uint8_t> data;
         } Packet;
 
-        typedef void (*ConnectCallback)(ClientID client_id);
-        typedef void (*DisconnectCallback)(ClientID client_id);
-
-        enum { SEND_ALL = -1 };
+        typedef void (*DisconnectCallback)();
 
 
 private:
-        ClientID _client_GUID = 0;
-        inline const ClientID NewClientGUID() {
-                if (_client_GUID == UINT16_MAX-2) throw std::runtime_error(
-                        "Client GUID counter overflow"
-                );
-
-                return _client_GUID++;
-        }
-
         enum Channel {
                 UNRELIABLE,
                 RELIABLE
         };
 
-        ENetHost* server = nullptr;
+        ENetHost* client = nullptr;
+        ENetPeer* server_peer = nullptr;
 
         DisconnectCallback disconnect_callback = nullptr;
-        ConnectCallback connect_callback = nullptr;
-
-        std::unordered_map<ENetPeer*, ClientID> peer_to_client_id;
-        std::unordered_map<ClientID, ENetPeer*> client_id_to_peer;
 
 
 public:
-        SimplENetServer(
+        SimplENetClient(
+                const char* ip,
                 int port,
-                size_t max_clients = 1,
-                ConnectCallback connect_callback = nullptr,
+                int connect_timeout = 5000,
                 DisconnectCallback disconnect_callback = nullptr
         ) {
                 if (enet_initialize() != 0) throw std::runtime_error(
                         "Failed to initialize ENet"
                 );
 
-                ENetAddress address = {0};
-                address.host = ENET_HOST_ANY;
-                address.port = port;
-                server = enet_host_create(&address, max_clients, 2, 0, 0);
-                if (server == nullptr) throw std::runtime_error(
-                        "Failed to create ENet server"
+                client = enet_host_create(nullptr, 1, 2, 0, 0);
+                if (client == nullptr) throw std::runtime_error(
+                        "Failed to create ENet client"
                 );
 
-                this->connect_callback = connect_callback;
+                ENetAddress address = {0};
+                enet_address_set_host(&address, ip);
+                address.port = port;
+                server_peer = enet_host_connect(client, &address, 2, 0);
+                if (server_peer == nullptr) throw std::runtime_error(
+                        "Failed to initiate connection to server"
+                );
+                ENetEvent event;
+                if (
+                        enet_host_service(
+                                client,
+                                &event,
+                                connect_timeout
+                        ) <= 0
+                        ||
+                        event.type != ENET_EVENT_TYPE_CONNECT
+                ) throw std::runtime_error(
+                        "Failed to connect to server"
+                );
+
                 this->disconnect_callback = disconnect_callback;
 
                 #ifdef _WIN32
@@ -6340,7 +6341,6 @@ public:
 
         void send(
                 std::vector<uint8_t> data,
-                ClientID client_id = SEND_ALL,
                 bool reliable = true,
                 PacketType packet_type = 0
         ) {
@@ -6349,11 +6349,8 @@ public:
                         sizeof(PacketType)+sizeof(ClientID)+data.size()
                 );
                 packet_data.push_back(packet_type);
-                packet_data.insert(
-                        packet_data.end(),
-                        &client_id,
-                        &client_id + sizeof(client_id)
-                );
+                packet_data.push_back(0);
+                packet_data.push_back(0);
                 packet_data.insert(
                         packet_data.end(),
                         data.begin(),
@@ -6364,13 +6361,8 @@ public:
                         packet_data.size(),
                         reliable ? ENET_PACKET_FLAG_RELIABLE : 0
                 );
-                if (client_id == SEND_ALL) enet_host_broadcast(
-                        server,
-                        reliable ? Channel::RELIABLE : Channel::UNRELIABLE,
-                        packet
-                );
-                else enet_peer_send(
-                        client_id_to_peer[client_id],
+                enet_peer_send(
+                        server_peer,
                         reliable ? Channel::RELIABLE : Channel::UNRELIABLE,
                         packet
                 );
@@ -6379,27 +6371,9 @@ public:
         std::vector<Packet> service() {
                 std::vector<Packet> packets;
                 ENetEvent event;
-                while (enet_host_service(server, &event, 0) > 0) {
+                while (enet_host_service(client, &event, 0) > 0) {
                         switch (event.type) {
                                 default: break;
-
-                                case ENET_EVENT_TYPE_CONNECT:
-                                {
-                                        if (
-                                                peer_to_client_id.find(event.peer)
-                                                ==
-                                                peer_to_client_id.end()
-                                        ) {
-                                                const ClientID client_id = NewClientGUID();
-                                                peer_to_client_id[event.peer] = client_id;
-                                                client_id_to_peer[client_id] = event.peer;
-                                        }
-
-                                        if (connect_callback) connect_callback(
-                                                peer_to_client_id[event.peer]
-                                        );
-                                }
-                                break;
 
                                 case ENET_EVENT_TYPE_RECEIVE:
                                 {
@@ -6439,12 +6413,7 @@ public:
                                 case ENET_EVENT_TYPE_DISCONNECT:
                                 case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:
                                 {
-                                        if (disconnect_callback) disconnect_callback(
-                                                peer_to_client_id[event.peer]
-                                        );
-
-                                        client_id_to_peer.erase(peer_to_client_id[event.peer]);
-                                        peer_to_client_id.erase(event.peer);
+                                        if (disconnect_callback) disconnect_callback();
                                 }
                                 break;
                         }
@@ -6453,12 +6422,14 @@ public:
                 return packets;
         }
 
-        ~SimplENetServer() {
+        ~SimplENetClient() {
                 #ifdef _WIN32
                 timeEndPeriod(1);
                 #endif
 
-                enet_host_destroy(server);
+                enet_peer_reset(server_peer);
+                enet_host_flush(client);
+                enet_host_destroy(client);
                 enet_deinitialize();
         }
 };
