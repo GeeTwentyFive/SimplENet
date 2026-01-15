@@ -6345,16 +6345,35 @@ public:
         void send(
                 std::vector<uint8_t> data,
                 ClientID client_id = SEND_ALL,
-                bool reliable = true, // TODO: pick both channel *and* reliability
-                PacketType packet_type = 0 // TODO: append
+                bool reliable = true,
+                PacketType packet_type = 0
         ) {
-                std::vector<uint8_t> packet;
-                packet.reserve(
+                std::vector<uint8_t> packet_data;
+                packet_data.reserve(
                         sizeof(PacketType)+sizeof(ClientID)+data.size()
                 );
-                packet.push_back(packet_type);
-                packet.push_back(client_id); // TODO
-                //ENetPacket* packet = enet_packet_create();
+                packet_data.push_back(packet_type);
+                packet_data.push_back(client_id); // TODO
+                packet_data.insert(
+                        packet_data.end(),
+                        data.begin(),
+                        data.end()
+                );
+                ENetPacket* packet = enet_packet_create(
+                        packet_data.data(),
+                        packet_data.size(),
+                        reliable ? ENET_PACKET_FLAG_RELIABLE : 0
+                );
+                if (client_id == SEND_ALL) enet_host_broadcast(
+                        server,
+                        reliable ? Channel::RELIABLE : Channel::UNRELIABLE,
+                        packet
+                );
+                else enet_peer_send(
+                        client_id_to_peer[client_id],
+                        reliable ? Channel::RELIABLE : Channel::UNRELIABLE,
+                        packet
+                );
         }
 
         std::vector<Packet> service() {
