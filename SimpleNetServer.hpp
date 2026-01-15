@@ -6274,11 +6274,18 @@ extern "C" {
 
 class SimpleNetServer {
 public:
-        typedef uint64_t ClientID;
+        typedef uint16_t ClientID;
         typedef uint8_t PacketType;
 
-        typedef void (*ConnectCallback)();
-        typedef void (*DisconnectCallback)();
+        #pragma pack(1)
+        typedef struct {
+            PacketType packet_type;
+            ClientID client_id;
+            std::vector<uint8_t> data;
+        } Packet;
+
+        typedef void (*ConnectCallback)(ClientID client_id);
+        typedef void (*DisconnectCallback)(ClientID client_id);
 
         enum { SEND_ALL = -1 };
 
@@ -6286,7 +6293,7 @@ public:
 private:
         ClientID _client_GUID = 0;
         inline const ClientID NewClientGUID() {
-                if (_client_GUID == UINT64_MAX-2) throw std::runtime_error(
+                if (_client_GUID == UINT16_MAX-2) throw std::runtime_error(
                         "Client GUID counter overflow"
                 );
 
@@ -6301,6 +6308,9 @@ private:
 
         ENetHost* server;
 
+        DisconnectCallback disconnect_callback;
+        ConnectCallback connect_callback;
+
         std::unordered_map<ENetPeer*, ClientID> peer_to_client_id;
         std::unordered_map<ClientID, ENetPeer*> client_id_to_peer;
 
@@ -6308,7 +6318,9 @@ private:
 public:
         SimpleNetServer(
                 int port,
-                size_t max_clients = 1
+                size_t max_clients = 1,
+                ConnectCallback connect_callback = nullptr,
+                DisconnectCallback disconnect_callback = nullptr
         ) {
                 if (enet_initialize() != 0) throw std::runtime_error(
                         "Failed to initialize ENet"
@@ -6322,26 +6334,100 @@ public:
                         "Failed to create ENet server"
                 );
 
+                this->connect_callback = connect_callback;
+                this->disconnect_callback = disconnect_callback;
+
                 #ifdef _WIN32
                 timeBeginPeriod(1);
                 #endif
         }
 
         void send(
-                void* data,
-                size_t data_size,
-                PacketType packet_type = 0, // TODO: append
+                std::vector<uint8_t> data,
+                ClientID client_id = SEND_ALL,
                 bool reliable = true, // TODO: pick both channel *and* reliability
-                ClientID client_id = SEND_ALL
+                PacketType packet_type = 0 // TODO: append
         ) {
-                // TODO
+                std::vector<uint8_t> packet;
+                packet.reserve(
+                        sizeof(PacketType)+sizeof(ClientID)+data.size()
+                );
+                packet.push_back(packet_type);
+                packet.push_back(client_id); // TODO
+                //ENetPacket* packet = enet_packet_create();
         }
 
-        std::vector<
-                std::pair<PacketType, std::vector<char>>
-        > service() {
+        std::vector<Packet> service() {
+                std::vector<Packet> packets;
                 ENetEvent event;
-                // TODO: Loop -> save into vector -> return
+                while (enet_host_service(server, &event, 0) > 0) {
+                        switch (event.type) {
+                                default: break;
+
+                                case ENET_EVENT_TYPE_CONNECT:
+                                {
+                                        if (
+                                                peer_to_client_id.find(event.peer)
+                                                ==
+                                                peer_to_client_id.end()
+                                        ) {
+                                                const ClientID client_id = NewClientGUID();
+                                                peer_to_client_id[event.peer] = client_id;
+                                                client_id_to_peer[client_id] = event.peer;
+                                        }
+
+                                        connect_callback(peer_to_client_id[event.peer]);
+                                }
+                                break;
+
+                                case ENET_EVENT_TYPE_RECEIVE:
+                                {
+                                        if (
+                                                event.packet->dataLength <
+                                                sizeof(PacketType) + sizeof(ClientID)
+                                        ) break;
+
+                                        Packet received_packet;
+                                        received_packet.packet_type = *(
+                                                (PacketType*)(event.packet->data)
+                                        );
+                                        received_packet.client_id = *(
+                                                (ClientID*)(sizeof(PacketType) + event.packet->data)
+                                        );
+                                        received_packet.data.reserve(
+                                                event.packet->dataLength -
+                                                sizeof(PacketType)+sizeof(ClientID)
+                                        );
+                                        received_packet.data = std::vector<uint8_t>(
+                                                (
+                                                    sizeof(PacketType)+sizeof(ClientID) +
+                                                    event.packet->data
+                                                ),
+                                                (
+                                                    sizeof(PacketType)+sizeof(ClientID) +
+                                                    event.packet->data +
+                                                    event.packet->dataLength
+                                                )
+                                        );
+                                        packets.push_back(received_packet);
+
+                                        enet_packet_destroy(event.packet);
+                                }
+                                break;
+
+                                case ENET_EVENT_TYPE_DISCONNECT:
+                                case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:
+                                {
+                                        disconnect_callback(peer_to_client_id[event.peer]);
+
+                                        client_id_to_peer.erase(peer_to_client_id[event.peer]);
+                                        peer_to_client_id.erase(event.peer);
+                                }
+                                break;
+                        }
+                }
+
+                return packets;
         }
 
         ~SimpleNetServer() {
@@ -6352,8 +6438,4 @@ public:
                 enet_host_destroy(server);
                 enet_deinitialize();
         }
-
-
-private:
-        //
 };
