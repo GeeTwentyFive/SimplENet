@@ -1,3 +1,4 @@
+#include <thread>
 #include <iostream>
 
 #include "../SimpleNetServer.hpp"
@@ -7,14 +8,22 @@ int main() {
 try {
         SimplENetServer sns(55555);
         for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
                 std::vector<SimplENetServer::Packet> received_data = sns.service();
                 if (received_data.size() != 0) {
-                        std::cout
-                        << (char*)received_data[0].data.data()
-                        << std::endl;
+                        for (SimplENetServer::Packet& p : received_data) {
+                                std::cout << "Received packet type: " << std::to_string(p.packet_type) << std::endl;
+                                std::cout << "Received packet data: " << (char*)p.data.data() << std::endl;
+                        }
 
-                        std::string reply = "Hello";
-                        sns.send(std::vector<uint8_t>(reply.begin(), reply.end()));
+                        const std::string reply = "Hello from server";
+                        sns.send(
+                                std::vector<uint8_t>(reply.begin(), reply.end()),
+                                SimplENetServer::SEND_ALL,
+                                true,
+                                111
+                        );
                 }
         }
 

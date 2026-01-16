@@ -6259,6 +6259,7 @@ extern "C" {
 #endif // ENET_INCLUDE_H
 #pragma endregion _ENET_H
 
+#include <atomic>
 #include <limits.h>
 #include <stdexcept>
 #include <unordered_map>
@@ -6269,37 +6270,38 @@ extern "C" {
 #endif
 
 
+static std::atomic<int> _SEN_enet_refcount = 0;
+
+
 class SimplENetServer {
 public:
-        typedef uint16_t ClientID;
+        typedef uint64_t ClientID;
         typedef uint8_t PacketType;
 
-        #pragma pack(1)
         typedef struct {
             PacketType packet_type;
-            ClientID client_id;
             std::vector<uint8_t> data;
         } Packet;
 
         typedef void (*ConnectCallback)(ClientID client_id);
         typedef void (*DisconnectCallback)(ClientID client_id);
 
-        enum { SEND_ALL = -1 };
+        enum : uint64_t { SEND_ALL = UINT64_MAX };
 
 
 private:
         ClientID _client_GUID = 0;
         inline const ClientID NewClientGUID() {
-                if (_client_GUID == UINT16_MAX-2) throw std::runtime_error(
+                if (_client_GUID == UINT64_MAX-1) throw std::runtime_error(
                         "Client GUID counter overflow"
                 );
 
                 return _client_GUID++;
         }
 
-        enum Channel {
-                UNRELIABLE,
-                RELIABLE
+        enum Channel : uint8_t {
+                UNRELIABLE = 0,
+                RELIABLE = 1
         };
 
         ENetHost* server = nullptr;
@@ -6310,6 +6312,9 @@ private:
         std::unordered_map<ENetPeer*, ClientID> peer_to_client_id;
         std::unordered_map<ClientID, ENetPeer*> client_id_to_peer;
 
+        std::vector<uint8_t> _send_data;
+        std::vector<uint8_t> _recv_buffer;
+
 
 public:
         SimplENetServer(
@@ -6318,9 +6323,12 @@ public:
                 ConnectCallback connect_callback = nullptr,
                 DisconnectCallback disconnect_callback = nullptr
         ) {
-                if (enet_initialize() != 0) throw std::runtime_error(
-                        "Failed to initialize ENet"
-                );
+                if (_SEN_enet_refcount == 0) {
+                        if (enet_initialize() != 0) throw std::runtime_error(
+                                "Failed to initialize ENet"
+                        );
+                }
+                _SEN_enet_refcount++;
 
                 ENetAddress address = {0};
                 address.host = ENET_HOST_ANY;
@@ -6339,29 +6347,35 @@ public:
         }
 
         void send(
-                std::vector<uint8_t> data,
+                const std::vector<uint8_t>& data,
                 ClientID client_id = SEND_ALL,
                 bool reliable = true,
                 PacketType packet_type = 0
         ) {
-                std::vector<uint8_t> packet_data;
-                packet_data.reserve(
-                        sizeof(PacketType)+sizeof(ClientID)+data.size()
+                if (
+                        client_id != SEND_ALL &&
+                        (
+                                client_id_to_peer.find(client_id)
+                                ==
+                                client_id_to_peer.end()
+                        )
+                ) throw std::runtime_error(
+                        "Client not found"
                 );
-                packet_data.push_back(packet_type);
-                packet_data.insert(
-                        packet_data.end(),
-                        &client_id,
-                        &client_id + sizeof(client_id)
+
+                _send_data.clear();
+                _send_data.reserve(
+                        sizeof(PacketType)+data.size()
                 );
-                packet_data.insert(
-                        packet_data.end(),
+                _send_data.push_back(packet_type);
+                _send_data.insert(
+                        _send_data.end(),
                         data.begin(),
                         data.end()
                 );
                 ENetPacket* packet = enet_packet_create(
-                        packet_data.data(),
-                        packet_data.size(),
+                        _send_data.data(),
+                        _send_data.size(),
                         reliable ? ENET_PACKET_FLAG_RELIABLE : 0
                 );
                 if (client_id == SEND_ALL) enet_host_broadcast(
@@ -6369,11 +6383,15 @@ public:
                         reliable ? Channel::RELIABLE : Channel::UNRELIABLE,
                         packet
                 );
-                else enet_peer_send(
-                        client_id_to_peer[client_id],
-                        reliable ? Channel::RELIABLE : Channel::UNRELIABLE,
-                        packet
-                );
+                else {
+                        if (
+                                enet_peer_send(
+                                        client_id_to_peer[client_id],
+                                        reliable ? Channel::RELIABLE : Channel::UNRELIABLE,
+                                        packet
+                                ) != 0
+                        ) enet_packet_destroy(packet);
+                }
         }
 
         std::vector<Packet> service() {
@@ -6405,32 +6423,36 @@ public:
                                 {
                                         if (
                                                 event.packet->dataLength <
-                                                sizeof(PacketType) + sizeof(ClientID)
-                                        ) break;
+                                                sizeof(PacketType)
+                                        ) {
+                                                enet_packet_destroy(event.packet);
+                                                break;
+                                        }
 
-                                        Packet received_packet;
-                                        received_packet.packet_type = *(
-                                                (PacketType*)(event.packet->data)
+                                        _recv_buffer.reserve(
+                                                event.packet->dataLength +
+                                                sizeof(PacketType)
                                         );
-                                        received_packet.client_id = *(
-                                                (ClientID*)(sizeof(PacketType) + event.packet->data)
-                                        );
-                                        received_packet.data.reserve(
-                                                event.packet->dataLength -
-                                                sizeof(PacketType)+sizeof(ClientID)
-                                        );
-                                        received_packet.data = std::vector<uint8_t>(
+                                        _recv_buffer.clear();
+                                        _recv_buffer.insert(
+                                                _recv_buffer.end(),
                                                 (
-                                                    sizeof(PacketType)+sizeof(ClientID) +
-                                                    event.packet->data
+                                                        event.packet->data +
+                                                        sizeof(PacketType)
                                                 ),
                                                 (
-                                                    sizeof(PacketType)+sizeof(ClientID) +
-                                                    event.packet->data +
-                                                    event.packet->dataLength
+                                                        event.packet->data +
+                                                        event.packet->dataLength
                                                 )
                                         );
-                                        packets.push_back(received_packet);
+                                        packets.emplace_back();
+                                        Packet& received_packet = packets.back();
+                                        memcpy(
+                                                &received_packet.packet_type,
+                                                event.packet->data,
+                                                sizeof(PacketType)
+                                        );
+                                        received_packet.data = std::move(_recv_buffer);
 
                                         enet_packet_destroy(event.packet);
                                 }
@@ -6439,6 +6461,12 @@ public:
                                 case ENET_EVENT_TYPE_DISCONNECT:
                                 case ENET_EVENT_TYPE_DISCONNECT_TIMEOUT:
                                 {
+                                        if (
+                                                peer_to_client_id.find(event.peer)
+                                                ==
+                                                peer_to_client_id.end()
+                                        ) break;
+
                                         if (disconnect_callback) disconnect_callback(
                                                 peer_to_client_id[event.peer]
                                         );
@@ -6458,7 +6486,8 @@ public:
                 timeEndPeriod(1);
                 #endif
 
-                enet_host_destroy(server);
-                enet_deinitialize();
+                if (server) enet_host_destroy(server);
+                _SEN_enet_refcount--;
+                if (_SEN_enet_refcount == 0) enet_deinitialize();
         }
 };
