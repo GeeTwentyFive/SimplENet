@@ -6449,6 +6449,10 @@ public:
                 return received_packets;
         }
 
+        void disconnect_client(ClientID client_id) {
+                enet_peer_reset(client_id_to_peer[client_id]);
+        }
+
         ~SimplENetServer() {
                 #ifdef _WIN32
                 timeEndPeriod(1);
