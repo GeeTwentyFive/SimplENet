@@ -6263,6 +6263,7 @@ extern "C" {
 #include <limits.h>
 #include <stdexcept>
 #include <unordered_map>
+#include <span>
 #include <vector>
 
 #ifdef _WIN32
@@ -6276,12 +6277,6 @@ static std::atomic<int> _SEN_enet_refcount = 0;
 class SimplENetClient {
 public:
         typedef uint64_t ClientID;
-        typedef uint8_t PacketType;
-
-        typedef struct {
-            PacketType packet_type;
-            std::vector<uint8_t> data;
-        } Packet;
 
         typedef void (*DisconnectCallback)();
 
@@ -6297,7 +6292,6 @@ private:
 
         DisconnectCallback disconnect_callback = nullptr;
 
-        std::vector<uint8_t> _send_data;
         std::vector<uint8_t> _recv_buffer;
 
 
@@ -6348,23 +6342,12 @@ public:
         }
 
         void send(
-                const std::vector<uint8_t>& data,
-                bool reliable = true,
-                PacketType packet_type = 0
+                std::span<const std::byte> data,
+                bool reliable = true
         ) {
-                _send_data.clear();
-                _send_data.reserve(
-                        sizeof(PacketType)+data.size()
-                );
-                _send_data.push_back(packet_type);
-                _send_data.insert(
-                        _send_data.end(),
-                        data.begin(),
-                        data.end()
-                );
                 ENetPacket* packet = enet_packet_create(
-                        _send_data.data(),
-                        _send_data.size(),
+                        data.data(),
+                        data.size(),
                         reliable ? ENET_PACKET_FLAG_RELIABLE : 0
                 );
                 if (
@@ -6376,8 +6359,10 @@ public:
                 ) enet_packet_destroy(packet);
         }
 
-        std::vector<Packet> service() {
-                std::vector<Packet> packets;
+        std::vector<std::vector<uint8_t>> service() {
+                std::vector<
+                        std::vector<uint8_t>
+                > received_packets;
                 ENetEvent event;
                 while (enet_host_service(client, &event, 0) > 0) {
                         switch (event.type) {
@@ -6385,38 +6370,18 @@ public:
 
                                 case ENET_EVENT_TYPE_RECEIVE:
                                 {
-                                        if (
-                                                event.packet->dataLength <
-                                                sizeof(PacketType)
-                                        ) {
-                                                enet_packet_destroy(event.packet);
-                                                break;
-                                        }
-
-                                        _recv_buffer.reserve(
-                                                event.packet->dataLength +
-                                                sizeof(PacketType)
-                                        );
+                                        _recv_buffer.reserve(event.packet->dataLength);
                                         _recv_buffer.clear();
                                         _recv_buffer.insert(
                                                 _recv_buffer.end(),
-                                                (
-                                                        event.packet->data +
-                                                        sizeof(PacketType)
-                                                ),
+                                                event.packet->data,
                                                 (
                                                         event.packet->data +
                                                         event.packet->dataLength
                                                 )
                                         );
-                                        packets.emplace_back();
-                                        Packet& received_packet = packets.back();
-                                        memcpy(
-                                                &received_packet.packet_type,
-                                                event.packet->data,
-                                                sizeof(PacketType)
-                                        );
-                                        received_packet.data = std::move(_recv_buffer);
+                                        received_packets.emplace_back();
+                                        received_packets.back() = std::move(_recv_buffer);
 
                                         enet_packet_destroy(event.packet);
                                 }
@@ -6431,7 +6396,7 @@ public:
                         }
                 }
 
-                return packets;
+                return received_packets;
         }
 
         ~SimplENetClient() {
