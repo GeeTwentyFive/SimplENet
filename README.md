@@ -30,7 +30,7 @@ for (;;) {
                         std::cout << "^ received packet's data: " << (char*)p.second.data() << std::endl;
                 }
 
-                sns.send(std::as_bytes(std::span{"Hello from server"}));
+                sns.send("Hello from server", sizeof("Hello from server"));
         }
 }
 ```
@@ -40,7 +40,7 @@ for (;;) {
 
 ```cpp
 SimplENetClient snc("::1", 55555);
-snc.send(std::as_bytes(std::span{"Hello from client"}));
+snc.send("Hello from client", sizeof("Hello from client"));
 for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 

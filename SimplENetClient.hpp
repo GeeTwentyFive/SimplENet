@@ -6263,7 +6263,6 @@ extern "C" {
 #include <limits.h>
 #include <stdexcept>
 #include <unordered_map>
-#include <span>
 #include <vector>
 
 #ifdef _WIN32
@@ -6342,12 +6341,13 @@ public:
         }
 
         void send(
-                std::span<const std::byte> data,
+                const void* data,
+                size_t data_size,
                 bool reliable = true
         ) {
                 ENetPacket* packet = enet_packet_create(
-                        data.data(),
-                        data.size(),
+                        data,
+                        data_size,
                         reliable ? ENET_PACKET_FLAG_RELIABLE : 0
                 );
                 if (
